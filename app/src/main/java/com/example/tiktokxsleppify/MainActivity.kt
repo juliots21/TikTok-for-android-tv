@@ -3,6 +3,7 @@ package com.example.tiktokxsleppify
 import android.annotation.SuppressLint
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -22,10 +23,13 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.browser.customtabs.CustomTabsIntent
+import androidx.browser.customtabs.CustomTabColorSchemeParams
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
+    private var googleLoginWebView: WebView? = null  // WebView separado para login de Google
     private lateinit var loadingOverlay: FrameLayout
     private lateinit var dotRed: View
     private lateinit var dotCyan: View
@@ -107,7 +111,11 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "TikTokTV"
         private const val TIKTOK_URL = "https://www.tiktok.com/foryou"
+        private const val REQUEST_CODE_GOOGLE_LOGIN = 1001
     }
+
+    // Variable para almacenar la URL de retorno después del login de Google
+    private var pendingGoogleReturnUrl: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -207,17 +215,63 @@ class MainActivity : AppCompatActivity() {
         webView.requestFocus()
 
         webView.webViewClient = object : WebViewClient() {
+            
+            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                val url = request?.url?.toString() ?: return false
+                
+                // Interceptar URLs de Google y abrirlas en Chrome Custom Tabs
+                if (url.contains("accounts.google.com") || 
+                    url.contains("accounts.youtube.com") ||
+                    url.contains("google.com/signin") ||
+                    url.contains("google.com/o/oauth2")) {
+                    
+                    Log.d(TAG, "Interceptando URL de Google: $url")
+                    openGoogleLoginInCustomTabs(url)
+                    return true
+                }
+                
+                return false
+            }
+            
+            private fun openGoogleLoginInCustomTabs(originalUrl: String) {
+                // Google bloquea todos los WebViews y Custom Tabs para login OAuth
+                // Mostrar directamente alternativa al usuario
+                showGoogleLoginAlternative()
+            }
+            
+            private fun showGoogleLoginAlternative() {
+                val message = """
+                    El login con Google está restringido en dispositivos Android TV.
+                    
+                    Por favor, usa una de estas opciones:
+                    • Email y contraseña
+                    • Número de teléfono
+                    • Facebook
+                    • Twitter
+                    
+                    ¿Deseas ir a la página de login alternativa?
+                """.trimIndent()
+                
+                android.app.AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Login con Google no disponible")
+                    .setMessage(message)
+                    .setPositiveButton("Ir a Login") { _, _ ->
+                        webView.loadUrl("https://www.tiktok.com/login")
+                    }
+                    .setNegativeButton("Cancelar") { dialog, _ ->
+                        dialog.dismiss()
+                        if (webView.canGoBack()) webView.goBack()
+                    }
+                    .setCancelable(false)
+                    .show()
+            }
+            
             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                 super.onPageStarted(view, url, favicon)
                 
-                // --- FIX GOOGLE LOGIN: Dynamic User Agent & Script Suppression ---
-                // Google blocks sign-in if it detects navigator tampering or specific WebView UA markers.
-                if (url != null && url.contains("accounts.google.com")) {
-                    view?.settings?.userAgentString = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-                    return // Important: Bypass script injection on Google pages to avoid detection
-                } else {
-                    // Restore standard TikTok TV Desktop UA
-                    view?.settings?.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                // No inyectar scripts en URLs de Google (por si acaso llegan a cargarse)
+                if (url != null && (url.contains("accounts.google.com") || url.contains("google.com/signin"))) {
+                    return
                 }
 
                 val antiTouchScript = """
@@ -244,14 +298,55 @@ class MainActivity : AppCompatActivity() {
                 injectBridge()
                 webView.postDelayed({ loadingOverlay.visibility = View.GONE }, 1000)
             }
+            
             override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
                 if (request?.isForMainFrame == true) {
                     loadingOverlay.visibility = View.GONE
                     errorOverlay.visibility = View.VISIBLE
                 }
             }
-        }
+            
+        } // Fin del WebViewClient
         webView.webChromeClient = WebChromeClient()
+    }
+    
+    private fun openInExternalBrowser(url: String) {
+        try {
+            var cleanUrl = url.replace("&authError=", "").replace("?authError=", "?")
+            
+            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(cleanUrl))
+            intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            intent.addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            intent.setPackage("com.android.chrome")
+            
+            try {
+                startActivity(intent)
+            } catch (e: Exception) {
+                intent.setPackage(null)
+                startActivity(intent)
+            }
+            
+            pendingGoogleReturnUrl = TIKTOK_URL
+            Toast.makeText(this@MainActivity, "Abriendo Chrome externo...", Toast.LENGTH_SHORT).show()
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "No se pudo abrir navegador", e)
+            // Mostrar mensaje al usuario para usar login alternativo
+            Toast.makeText(this@MainActivity, 
+                "Google Login no disponible. Usa email/contraseña o número de teléfono.", 
+                Toast.LENGTH_LONG).show()
+            // Redirigir al login normal de TikTok
+            webView.loadUrl("https://www.tiktok.com/login")
+        }
+    }
+    
+    private fun removeGoogleLoginWebView() {
+        googleLoginWebView?.let { wv ->
+            val root = findViewById<View>(android.R.id.content) as? FrameLayout
+            root?.removeView(wv)
+            wv.destroy()
+        }
+        googleLoginWebView = null
     }
 
     private fun injectBridge() {
@@ -453,12 +548,28 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         setupFullscreen()
+        
+        // Recargar la página cuando regresa del login de Google para reflejar el estado de autenticación
+        if (pendingGoogleReturnUrl != null) {
+            webView.loadUrl(pendingGoogleReturnUrl ?: TIKTOK_URL)
+            pendingGoogleReturnUrl = null
+        }
     }
 
     override fun onDestroy() {
         vmHandler.removeCallbacksAndMessages(null)
+        removeGoogleLoginWebView()
         webView.destroy()
         super.onDestroy()
+    }
+    
+    override fun onBackPressed() {
+        // Si hay un WebView de Google Login activo, cerrarlo primero
+        if (googleLoginWebView != null) {
+            removeGoogleLoginWebView()
+            return
+        }
+        super.onBackPressed()
     }
 
     inner class AndroidHost {
